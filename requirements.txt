@@ -1,0 +1,8 @@
+setuptools==59.5.0
+prettytable
+easydict
+pyyaml
+ftfy
+regex
+tensorboard
+six
