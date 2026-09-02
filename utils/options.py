@@ -26,8 +26,10 @@ def get_args():
     parser.add_argument("--MLM", default=False, action='store_true', help="whether to use Mask Language Modeling dataset")
 
     ######################## loss settings ########################
-    parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'cmpm', 'id', 'itc', 'sdm']")
-    parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="mlm loss weight")
+    parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'amlm', 'cmpm', 'id', 'itc', 'sdm']")
+    parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="implicit MLM loss weight")
+    parser.add_argument("--amlm_loss_weight", type=float, default=0.5, help="explicit keyword MLM loss weight")
+    parser.add_argument("--keyword_file", default="", help="keyword list for explicit MLM; empty uses data/merged_keywords_tfidf.txt")
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     
     ######################## vison trainsformer settings ########################

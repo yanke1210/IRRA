@@ -82,10 +82,17 @@ def build_dataloader(args, tranforms=None):
         val_transforms = build_transforms(img_size=args.img_size,
                                           is_train=False)
 
-        if args.MLM:
+        tasks = [t.strip() for t in args.loss_names.split('+')]
+        use_mlm = 'mlm' in tasks
+        use_amlm = 'amlm' in tasks
+        if args.MLM or use_mlm or use_amlm:
+            keyword_file = getattr(args, "keyword_file", "") or None
             train_set = ImageTextMLMDataset(dataset.train,
                                      train_transforms,
-                                     text_length=args.text_length)
+                                     text_length=args.text_length,
+                                     use_mlm=use_mlm,
+                                     use_amlm=use_amlm,
+                                     keyword_file=keyword_file)
         else:
             train_set = ImageTextDataset(dataset.train,
                                      train_transforms,

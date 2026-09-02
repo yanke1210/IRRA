@@ -18,12 +18,12 @@ class IRRA(nn.Module):
 
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
 
-        if 'id' in args.loss_names:
+        if 'id' in self.current_task:
             self.classifier = nn.Linear(self.embed_dim, self.num_classes)
             nn.init.normal_(self.classifier.weight.data, std=0.001)
             nn.init.constant_(self.classifier.bias.data, val=0.0)
 
-        if 'mlm' in args.loss_names:
+        if self.use_mlm or self.use_amlm:
             self.cross_attn = nn.MultiheadAttention(self.embed_dim,
                                                     self.embed_dim // 64,
                                                     batch_first=True)
@@ -62,6 +62,8 @@ class IRRA(nn.Module):
     def _set_task(self):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
+        self.use_mlm = 'mlm' in self.current_task
+        self.use_amlm = 'amlm' in self.current_task
         print(f'Training Model with {self.current_task} tasks')
     
     
@@ -122,25 +124,38 @@ class IRRA(nn.Module):
             ret.update({'img_acc': image_precision})
             ret.update({'txt_acc': text_precision})
         
-        if 'mlm' in self.current_task:
-            mlm_ids = batch['mlm_ids']
-
-            mlm_feats = self.base_model.encode_text(mlm_ids)
-
-            x = self.cross_former(mlm_feats, image_feats, image_feats)
-
-            x = self.mlm_head(x)  # [batch_size, text_len, num_colors]
-
-            scores = x.float().reshape(-1, self.args.vocab_size)
+        if self.use_mlm:
+            mlm_scores = self._mlm_scores(batch['mlm_ids'], image_feats)
             mlm_labels = batch['mlm_labels'].reshape(-1)
-            ret.update({'mlm_loss': objectives.compute_mlm(scores, mlm_labels)*self.args.mlm_loss_weight})
+            ret.update({
+                'mlm_loss': objectives.compute_mlm(mlm_scores, mlm_labels)
+                            * self.args.mlm_loss_weight
+            })
+            ret.update({'mlm_acc': self._masked_token_acc(mlm_scores, mlm_labels)})
 
-            pred = scores.max(1)[1]
-            mlm_label_idx = torch.nonzero(mlm_labels)
-            acc = (pred[mlm_label_idx] == mlm_labels[mlm_label_idx]).float().mean()
-            ret.update({'mlm_acc': acc})
+        if self.use_amlm:
+            amlm_scores = self._mlm_scores(batch['amlm_ids'], image_feats)
+            amlm_labels = batch['amlm_labels'].reshape(-1)
+            ret.update({
+                'amlm_loss': objectives.compute_mlm(amlm_scores, amlm_labels)
+                             * self.args.amlm_loss_weight
+            })
+            ret.update({'amlm_acc': self._masked_token_acc(amlm_scores, amlm_labels)})
 
         return ret
+
+    def _mlm_scores(self, mlm_ids, image_feats):
+        mlm_feats = self.base_model.encode_text(mlm_ids)
+        x = self.cross_former(mlm_feats, image_feats, image_feats)
+        x = self.mlm_head(x)
+        return x.float().reshape(-1, self.args.vocab_size)
+
+    def _masked_token_acc(self, scores, labels):
+        pred = scores.max(1)[1]
+        label_idx = torch.nonzero(labels)
+        if label_idx.numel() == 0:
+            return scores.new_zeros(())
+        return (pred[label_idx] == labels[label_idx]).float().mean()
 
 
 def build_model(args, num_classes=11003):

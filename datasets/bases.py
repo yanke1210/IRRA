@@ -4,11 +4,14 @@ import os.path as osp
 import logging
 import torch
 from utils.iotools import read_image
-from utils.simple_tokenizer import SimpleTokenizer
+from utils.simple_tokenizer import (
+    SimpleTokenizer,
+    default_keyword_file,
+    extract_keywords,
+    load_keyword_set,
+)
 from prettytable import PrettyTable
 import random
-import regex as re
-import copy
 
 
 class BaseDataset(object):
@@ -135,13 +138,25 @@ class ImageTextMLMDataset(Dataset):
                  dataset,
                  transform=None,
                  text_length: int = 77,
-                 truncate: bool = True):
+                 truncate: bool = True,
+                 use_mlm: bool = True,
+                 use_amlm: bool = False,
+                 keyword_file=None):
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
         self.truncate = truncate
+        self.use_mlm = use_mlm
+        self.use_amlm = use_amlm
+        self.keyword_file = osp.abspath(keyword_file) if keyword_file else default_keyword_file()
 
         self.tokenizer = SimpleTokenizer()
+
+        if self.use_amlm:
+            n_keywords = len(load_keyword_set(self.keyword_file))
+            logging.getLogger("IRRA.dataset").info(
+                "AMLM keyword file: {} ({} words)".format(
+                    self.keyword_file, n_keywords))
 
     def __len__(self):
         return len(self.dataset)
@@ -153,19 +168,56 @@ class ImageTextMLMDataset(Dataset):
             img = self.transform(img)
         
         caption_tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
-
-        mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(caption_tokens.cpu().numpy())
+        token_ids = caption_tokens.cpu().numpy().copy()
 
         ret = {
             'pids': pid,
             'image_ids': image_id,
             'images': img,
             'caption_ids': caption_tokens,
-            'mlm_ids': mlm_tokens,
-            'mlm_labels': mlm_labels
         }
 
+        if self.use_mlm:
+            mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(
+                token_ids.copy())
+            ret['mlm_ids'] = mlm_tokens
+            ret['mlm_labels'] = mlm_labels
+
+        if self.use_amlm:
+            keyword_positions = extract_keywords(
+                caption, keyword_file=self.keyword_file)
+            token_positions = self._map_keyword_positions_to_tokens(
+                keyword_positions, caption_tokens)
+            amlm_tokens, amlm_labels = self._build_attribute_masked_tokens_and_labels(
+                token_ids.copy(), token_positions)
+            ret['amlm_ids'] = amlm_tokens
+            ret['amlm_labels'] = amlm_labels
+
         return ret
+
+    def _map_keyword_positions_to_tokens(self, keyword_positions, caption_tokens):
+        sot = self.tokenizer.encoder["<|startoftext|>"]
+        eot = self.tokenizer.encoder["<|endoftext|>"]
+        mask = self.tokenizer.encoder["<|mask|>"]
+        token_ids = caption_tokens.tolist()
+        mapped = []
+        for position in keyword_positions:
+            token_pos = position + 1  # skip <|startoftext|>
+            if token_pos >= len(token_ids):
+                continue
+            tok = token_ids[token_pos]
+            if tok == 0 or tok in (sot, eot, mask):
+                continue
+            mapped.append(token_pos)
+        return mapped
+
+    def _build_attribute_masked_tokens_and_labels(self, tokens, attribute_position):
+        mask = self.tokenizer.encoder["<|mask|>"]
+        labels = torch.zeros(len(tokens), dtype=torch.long)
+        for position in attribute_position:
+            labels[position] = int(tokens[position])
+            tokens[position] = mask
+        return torch.tensor(tokens), labels
 
     def _build_random_masked_tokens_and_labels(self, tokens):
         """

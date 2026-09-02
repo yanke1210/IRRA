@@ -43,6 +43,10 @@ def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, fa
 
 
 def compute_mlm(scores, labels):
+    # ignore_index=0 drops unmasked positions; if a batch has no valid
+    # targets (possible for keyword masking), CE would be nan.
+    if (labels != 0).sum() == 0:
+        return scores.new_zeros(())
     ce = nn.CrossEntropyLoss(ignore_index=0)
     return ce(scores, labels)
 

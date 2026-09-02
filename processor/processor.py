@@ -28,9 +28,11 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "itc_loss": AverageMeter(),
         "id_loss": AverageMeter(),
         "mlm_loss": AverageMeter(),
+        "amlm_loss": AverageMeter(),
         "img_acc": AverageMeter(),
         "txt_acc": AverageMeter(),
-        "mlm_acc": AverageMeter()
+        "mlm_acc": AverageMeter(),
+        "amlm_acc": AverageMeter(),
     }
 
     tb_writer = SummaryWriter(log_dir=args.output_dir)
@@ -56,10 +58,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             meters['itc_loss'].update(ret.get('itc_loss', 0), batch_size)
             meters['id_loss'].update(ret.get('id_loss', 0), batch_size)
             meters['mlm_loss'].update(ret.get('mlm_loss', 0), batch_size)
+            meters['amlm_loss'].update(ret.get('amlm_loss', 0), batch_size)
 
             meters['img_acc'].update(ret.get('img_acc', 0), batch_size)
             meters['txt_acc'].update(ret.get('txt_acc', 0), batch_size)
             meters['mlm_acc'].update(ret.get('mlm_acc', 0), 1)
+            meters['amlm_acc'].update(ret.get('amlm_acc', 0), 1)
 
             optimizer.zero_grad()
             total_loss.backward()

@@ -13,6 +13,30 @@ def default_bpe():
 
 
 @lru_cache()
+def default_keyword_file():
+    return os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data/merged_keywords_tfidf.txt")
+    )
+
+
+@lru_cache()
+def load_keyword_set(keyword_file=None):
+    keyword_file = keyword_file or default_keyword_file()
+    with open(keyword_file, "r", encoding="utf-8") as unique_words_file:
+        return set(unique_words_file.read().split())
+
+
+def extract_keywords(sentence, keyword_file=None):
+    unique_words = load_keyword_set(keyword_file)
+    matching_positions = []
+    for position, word in enumerate(sentence.split()):
+        normalized = re.sub(r"^[^a-z0-9-]+|[^a-z0-9-]+$", "", word.lower())
+        if normalized and normalized in unique_words:
+            matching_positions.append(position)
+    return matching_positions
+
+
+@lru_cache()
 def bytes_to_unicode():
     """
     Returns list of utf-8 byte and a corresponding list of unicode strings.
