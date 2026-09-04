@@ -168,7 +168,7 @@ class ImageTextMLMDataset(Dataset):
             img = self.transform(img)
         
         caption_tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
-        token_ids = caption_tokens.cpu().numpy().copy()
+        clean_token_ids = caption_tokens.cpu().numpy().copy()
 
         ret = {
             'pids': pid,
@@ -177,21 +177,28 @@ class ImageTextMLMDataset(Dataset):
             'caption_ids': caption_tokens,
         }
 
-        if self.use_mlm:
-            mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(
-                token_ids.copy())
-            ret['mlm_ids'] = mlm_tokens
-            ret['mlm_labels'] = mlm_labels
-
         if self.use_amlm:
             keyword_positions = extract_keywords(
                 caption, keyword_file=self.keyword_file)
             token_positions = self._map_keyword_positions_to_tokens(
                 keyword_positions, caption_tokens)
+            # AMLM-only mirrors the original IRRA behavior: its masked tokens
+            # also become the ITC input. In combined mode, keep AMLM separate
+            # so ITC continues to share only the implicit random mask.
+            amlm_source = (clean_token_ids.copy() if self.use_mlm
+                           else caption_tokens.cpu().numpy())
             amlm_tokens, amlm_labels = self._build_attribute_masked_tokens_and_labels(
-                token_ids.copy(), token_positions)
+                amlm_source, token_positions)
             ret['amlm_ids'] = amlm_tokens
             ret['amlm_labels'] = amlm_labels
+
+        if self.use_mlm:
+            # Preserve the original IRRA behavior: numpy() shares storage with
+            # caption_tokens, so random MLM masking also becomes the ITC input.
+            mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(
+                caption_tokens.cpu().numpy())
+            ret['mlm_ids'] = mlm_tokens
+            ret['mlm_labels'] = mlm_labels
 
         return ret
 
