@@ -182,13 +182,8 @@ class ImageTextMLMDataset(Dataset):
                 caption, keyword_file=self.keyword_file)
             token_positions = self._map_keyword_positions_to_tokens(
                 keyword_positions, caption_tokens)
-            # AMLM-only mirrors the original IRRA behavior: its masked tokens
-            # also become the ITC input. In combined mode, keep AMLM separate
-            # so ITC continues to share only the implicit random mask.
-            amlm_source = (clean_token_ids.copy() if self.use_mlm
-                           else caption_tokens.cpu().numpy())
             amlm_tokens, amlm_labels = self._build_attribute_masked_tokens_and_labels(
-                amlm_source, token_positions)
+                clean_token_ids.copy(), token_positions)
             ret['amlm_ids'] = amlm_tokens
             ret['amlm_labels'] = amlm_labels
 
