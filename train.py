@@ -1,10 +1,10 @@
-import importlib.util
 import os
 import os.path as op
 import torch
 import numpy as np
 import random
 import time
+import yaml
 
 from datasets import build_dataloader
 from processor.processor import do_train
@@ -18,14 +18,25 @@ from utils.options import get_args
 from utils.comm import get_rank, synchronize
 
 
-def apply_dataset_config(args):
-    config_path = op.join(op.dirname(op.abspath(__file__)), 'config', '{}.py'.format(args.dataset_name))
+def apply_dataset_config(args, explicit):
+    config_path = op.join(op.dirname(op.abspath(__file__)), 'config', '{}.yaml'.format(args.dataset_name))
     if not op.isfile(config_path):
         return args
-    spec = importlib.util.spec_from_file_location('dataset_config_{}'.format(args.dataset_name), config_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    for key, value in module.cfg.items():
+    with open(config_path, 'r', encoding='utf-8') as f:
+        loaded = yaml.safe_load(f) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError("Dataset config must be a mapping: {}".format(config_path))
+    unknown = [key for key in loaded if not hasattr(args, key)]
+    if unknown:
+        raise RuntimeError(
+            "Unknown keys in {}: {}".format(config_path, ", ".join(sorted(unknown))))
+    for key, value in loaded.items():
+        if key in explicit:
+            continue
+        if key == 'img_size':
+            value = tuple(value)
+        elif key == 'milestones':
+            value = list(value)
         setattr(args, key, value)
     return args
 
@@ -41,7 +52,8 @@ def set_seed(seed=0):
 
 
 if __name__ == '__main__':
-    args = apply_dataset_config(get_args())
+    args, explicit = get_args()
+    args = apply_dataset_config(args, explicit)
     set_seed(1+get_rank())
     name = args.name
 

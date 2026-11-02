@@ -1,0 +1,79 @@
+######################## general settings ########################
+local_rank: 0
+name: irra
+output_dir: logs
+log_period: 100
+eval_period: 1
+patience: 15
+val_dataset: test
+resume: false
+resume_ckpt_file: ""
+
+######################## model general settings ########################
+pretrain_choice: ViT-B/16
+temperature: 0.02
+img_aug: true
+
+cmt_depth: 4
+masked_token_rate: 0.8
+masked_token_unchanged_rate: 0.1
+lr_factor: 5.0
+MLM: true
+
+######################## loss settings ########################
+loss_names: sdm+id+mlm+tc
+sdm_loss_weight: 1.0
+mlm_loss_weight: 1.0
+amlm_loss_weight: 0.5
+keyword_file: data/RSICD_keyword_512_refined.txt
+amlm_keyword_mask_ratio: 0.5
+id_loss_weight: 1.0
+tc_loss_weight: 1.0
+tc_teacher_temperature: 0.07
+tc_soft_weight_end: 0.3
+tc_momentum: 0.995
+tc_image_gamma: 2.0
+tc_text_gamma: 2.0
+tc_max_gamma: 5.0
+tc_min_gamma: -1.0
+tc_gamma_alpha: 0.1
+tc_num_bins: 15
+
+######################## vision transformer settings ########################
+img_size: [224, 224]
+stride_size: 16
+
+######################## text transformer settings ########################
+text_length: 77
+vocab_size: 49408
+
+######################## solver ########################
+optimizer: Adam
+lr: 1.0e-5
+bias_lr_factor: 2.0
+momentum: 0.9
+weight_decay: 4.0e-5
+weight_decay_bias: 0.0
+alpha: 0.9
+beta: 0.999
+
+######################## scheduler ########################
+num_epoch: 60
+milestones: [20, 50]
+gamma: 0.1
+warmup_factor: 0.1
+warmup_epochs: 5
+warmup_method: linear
+lrscheduler: cosine
+target_lr: 0
+power: 0.9
+
+######################## dataset ########################
+dataset_name: RSICD
+sampler: random
+num_instance: 4
+root_dir: ./data
+batch_size: 64
+test_batch_size: 512
+num_workers: 8
+training: true

@@ -1,12 +1,8 @@
 #!/bin/bash
+# Best hyperparameters for the dataset are in config/${DATASET_NAME}.yaml.
+# Append flags to override them, for example: --lr 1e-4
 DATASET_NAME="RSICD"
 
 CUDA_VISIBLE_DEVICES=0 \
 python train.py \
---name irra \
---img_aug \
---batch_size 64 \
---MLM \
---dataset_name $DATASET_NAME \
---loss_names 'sdm+mlm+id+tc' \
---num_epoch 60
+--dataset_name $DATASET_NAME

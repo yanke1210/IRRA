@@ -434,7 +434,6 @@ dock
 extends
 barren
 marks
-2
 junction
 mountainpeak
 artificial
@@ -474,7 +473,6 @@ ridges
 clouds
 situated
 rail
-u
 columnar
 vegetations
 relatively

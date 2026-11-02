@@ -1,4 +1,15 @@
 import argparse
+import sys
+
+
+def _explicit_dests(parser):
+    explicit = set()
+    for action in parser._actions:
+        for opt in action.option_strings:
+            for arg in sys.argv[1:]:
+                if arg == opt or arg.startswith(opt + "="):
+                    explicit.add(action.dest)
+    return explicit
 
 
 def get_args():
@@ -28,6 +39,7 @@ def get_args():
 
     ######################## loss settings ########################
     parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'amlm', 'cmpm', 'id', 'itc', 'sdm', 'tc']")
+    parser.add_argument("--sdm_loss_weight", type=float, default=1.0, help="SDM loss weight")
     parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="implicit MLM loss weight")
     parser.add_argument("--amlm_loss_weight", type=float, default=0.5, help="explicit keyword MLM loss weight")
     parser.add_argument("--keyword_file", default="", help="keyword list for explicit MLM; empty uses the dataset vocab for RSICD/RSITMD")
@@ -45,7 +57,7 @@ def get_args():
     parser.add_argument("--tc_num_bins", type=int, default=15, help="bins for TC calibration gap")
     
     ######################## vison trainsformer settings ########################
-    parser.add_argument("--img_size", type=tuple, default=(256, 256))
+    parser.add_argument("--img_size", type=int, nargs=2, default=(256, 256), help="image height and width")
     parser.add_argument("--stride_size", type=int, default=16)
 
     ######################## text transformer settings ########################
@@ -84,5 +96,5 @@ def get_args():
     parser.add_argument("--test", dest='training', default=True, action='store_false')
 
     args = parser.parse_args()
-
-    return args
+    args.img_size = tuple(args.img_size)
+    return args, _explicit_dests(parser)
