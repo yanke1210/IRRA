@@ -1,8 +1,6 @@
-"""Merge and deduplicate per-dataset keyword lists.
+"""Merge RSICD and RSITMD keyword lists.
 
-Reads the three ``*_keyword_512.txt`` files under ``data/``, unions them
-with a set, and writes the unique keywords to ``data/merged_keywords.txt``
-(one word per line, sorted).
+Writes the unique words to ``data/merged_keywords.txt``.
 
 Example:
     python utils/keyword_merge.py
@@ -13,9 +11,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_REPO_ROOT, "data")
 
 KEYWORD_FILES = (
-    "CUHK-PEDES_keyword_512.txt",
-    "ICFG-PEDES_keyword_512.txt",
-    "RSTPReid_keyword_512.txt",
+    "RSICD_keyword_512.txt",
+    "RSITMD_keyword_512.txt",
 )
 OUTPUT_NAME = "merged_keywords.txt"
 

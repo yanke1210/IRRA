@@ -7,7 +7,7 @@ from utils.iotools import read_image
 from utils.simple_tokenizer import (
     SimpleTokenizer,
     default_keyword_file,
-    extract_keywords,
+    keyword_bpe_spans,
     load_keyword_set,
 )
 from prettytable import PrettyTable
@@ -141,7 +141,8 @@ class ImageTextMLMDataset(Dataset):
                  truncate: bool = True,
                  use_mlm: bool = True,
                  use_amlm: bool = False,
-                 keyword_file=None):
+                 keyword_file=None,
+                 amlm_keyword_mask_ratio: float = 0.5):
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
@@ -149,6 +150,7 @@ class ImageTextMLMDataset(Dataset):
         self.use_mlm = use_mlm
         self.use_amlm = use_amlm
         self.keyword_file = osp.abspath(keyword_file) if keyword_file else default_keyword_file()
+        self.amlm_keyword_mask_ratio = amlm_keyword_mask_ratio
 
         self.tokenizer = SimpleTokenizer()
 
@@ -178,10 +180,10 @@ class ImageTextMLMDataset(Dataset):
         }
 
         if self.use_amlm:
-            keyword_positions = extract_keywords(
-                caption, keyword_file=self.keyword_file)
-            token_positions = self._map_keyword_positions_to_tokens(
-                keyword_positions, caption_tokens)
+            spans = keyword_bpe_spans(
+                caption, self.tokenizer, self.keyword_file, self.text_length)
+            spans = self._select_keyword_spans(spans)
+            token_positions = [index for span in spans for index in span]
             amlm_tokens, amlm_labels = self._build_attribute_masked_tokens_and_labels(
                 clean_token_ids.copy(), token_positions)
             ret['amlm_ids'] = amlm_tokens
@@ -197,21 +199,13 @@ class ImageTextMLMDataset(Dataset):
 
         return ret
 
-    def _map_keyword_positions_to_tokens(self, keyword_positions, caption_tokens):
-        sot = self.tokenizer.encoder["<|startoftext|>"]
-        eot = self.tokenizer.encoder["<|endoftext|>"]
-        mask = self.tokenizer.encoder["<|mask|>"]
-        token_ids = caption_tokens.tolist()
-        mapped = []
-        for position in keyword_positions:
-            token_pos = position + 1  # skip <|startoftext|>
-            if token_pos >= len(token_ids):
-                continue
-            tok = token_ids[token_pos]
-            if tok == 0 or tok in (sot, eot, mask):
-                continue
-            mapped.append(token_pos)
-        return mapped
+    def _select_keyword_spans(self, spans):
+        if not spans:
+            return []
+        kept = [span for span in spans if random.random() < self.amlm_keyword_mask_ratio]
+        if not kept:
+            kept = [random.choice(spans)]
+        return kept
 
     def _build_attribute_masked_tokens_and_labels(self, tokens, attribute_position):
         mask = self.tokenizer.encoder["<|mask|>"]

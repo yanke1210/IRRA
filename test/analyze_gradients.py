@@ -25,7 +25,7 @@ from model import build_model
 from utils.checkpoint import Checkpointer
 from utils.iotools import load_train_configs
 
-LOSS_KEYS = ("sdm_loss", "id_loss", "mlm_loss", "amlm_loss", "itc_loss")
+LOSS_KEYS = ("sdm_loss", "id_loss", "mlm_loss", "amlm_loss", "itc_loss", "tc_loss")
 
 
 def parse_args():

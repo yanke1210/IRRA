@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import os.path as op
 import torch
@@ -17,6 +18,18 @@ from utils.options import get_args
 from utils.comm import get_rank, synchronize
 
 
+def apply_dataset_config(args):
+    config_path = op.join(op.dirname(op.abspath(__file__)), 'config', '{}.py'.format(args.dataset_name))
+    if not op.isfile(config_path):
+        return args
+    spec = importlib.util.spec_from_file_location('dataset_config_{}'.format(args.dataset_name), config_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for key, value in module.cfg.items():
+        setattr(args, key, value)
+    return args
+
+
 def set_seed(seed=0):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -28,7 +41,7 @@ def set_seed(seed=0):
 
 
 if __name__ == '__main__':
-    args = get_args()
+    args = apply_dataset_config(get_args())
     set_seed(1+get_rank())
     name = args.name
 

@@ -5,27 +5,27 @@ from utils.iotools import read_json
 from .bases import BaseDataset
 
 
-class ICFGPEDES(BaseDataset):
+class RSICD(BaseDataset):
     """
-    ICFG-PEDES
-
-    Reference:
-    Semantically Self-Aligned Network for Text-to-Image Part-aware Person Re-identification arXiv 2107
-
-    URL: http://arxiv.org/abs/2107.12666
+    RSICD
 
     Dataset statistics:
-    # identities: 4102
-    # images: 34674 (train) + 4855 (query) + 14993 (gallery)
-    # cameras: 15
+    +--------+------+--------+----------+
+    | subset | ids  | images | captions |
+    +--------+------+--------+----------+
+    | train  | 8734 |  8734  |  43670   |
+    |  test  | 1093 |  1093  |   5465   |
+    |  val   | 1094 |  1094  |   5470   |
+    +--------+------+--------+----------+
     """
-    dataset_dir = 'ICFG-PEDES'
+    dataset_dir = 'RSICD'
 
     def __init__(self, root='', verbose=True):
-        super(ICFGPEDES, self).__init__()
+        super(RSICD, self).__init__()
         self.dataset_dir = op.join(root, self.dataset_dir)
-        self.img_dir = op.join(self.dataset_dir, 'imgs/')
-        self.anno_path = op.join(self.dataset_dir, 'ICFG-PEDES.json')
+        self.img_dir = op.join(self.dataset_dir, 'RSICD_images/')
+
+        self.anno_path = op.join(self.dataset_dir, 'dataset_rsicd.json')
         self._check_before_run()
 
         self.train_annos, self.test_annos, self.val_annos = self._split_anno(self.anno_path)
@@ -35,13 +35,12 @@ class ICFGPEDES(BaseDataset):
         self.val, self.val_id_container = self._process_anno(self.val_annos)
 
         if verbose:
-            self.logger.info("=> ICFG-PEDES Images and Captions are loaded")
+            self.logger.info("=> RSICD Images and Captions are loaded")
             self.show_dataset_info()
-
 
     def _split_anno(self, anno_path: str):
         train_annos, test_annos, val_annos = [], [], []
-        annos = read_json(anno_path)
+        annos = read_json(anno_path)['images']
         for anno in annos:
             if anno['split'] == 'train':
                 train_annos.append(anno)
@@ -51,48 +50,48 @@ class ICFGPEDES(BaseDataset):
                 val_annos.append(anno)
         return train_annos, test_annos, val_annos
 
-  
     def _process_anno(self, annos: List[dict], training=False):
         pid_container = set()
         if training:
             dataset = []
             image_id = 0
             for anno in annos:
-                pid = int(anno['id'])
+                pid = image_id
                 pid_container.add(pid)
-                img_path = op.join(self.img_dir, anno['file_path'])
-                captions = anno['captions'] # caption list
+                img_path = op.join(self.img_dir, anno['filename'])
+                captions = anno['sentences']
                 for caption in captions:
-                    dataset.append((pid, image_id, img_path, caption))
+                    dataset.append((pid, image_id, img_path, caption['raw']))
                 image_id += 1
             for idx, pid in enumerate(pid_container):
                 # check pid begin from 0 and no break
                 assert idx == pid, f"idx: {idx} and pid: {pid} are not match"
             return dataset, pid_container
         else:
-            dataset = {}
             img_paths = []
             captions = []
             image_pids = []
             caption_pids = []
-            for anno in annos:
-                pid = int(anno['id'])
+            cap2img_index = []
+            for i, anno in enumerate(annos):
+                pid = i
                 pid_container.add(pid)
-                img_path = op.join(self.img_dir, anno['file_path'])
+                img_path = op.join(self.img_dir, anno['filename'])
                 img_paths.append(img_path)
                 image_pids.append(pid)
-                caption_list = anno['captions'] # caption list
+                caption_list = anno['sentences']
                 for caption in caption_list:
-                    captions.append(caption)
+                    captions.append(caption['raw'])
                     caption_pids.append(pid)
+                    cap2img_index.append(i)
             dataset = {
                 "image_pids": image_pids,
                 "img_paths": img_paths,
                 "caption_pids": caption_pids,
-                "captions": captions
+                "captions": captions,
+                "cap2img_index": cap2img_index
             }
             return dataset, pid_container
-
 
     def _check_before_run(self):
         """Check if all files are available before going deeper"""

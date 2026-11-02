@@ -15,25 +15,48 @@ def default_bpe():
 @lru_cache()
 def default_keyword_file():
     return os.path.abspath(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data/merged_keywords_tfidf.txt")
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data/merged_keywords.txt")
     )
+
+
+_EDGE_PUNCT = re.compile(r"^[^a-z0-9-]+|[^a-z0-9-]+$")
+
+
+def normalize_keyword(word):
+    return _EDGE_PUNCT.sub("", word.lower())
 
 
 @lru_cache()
 def load_keyword_set(keyword_file=None):
     keyword_file = keyword_file or default_keyword_file()
+    words = set()
     with open(keyword_file, "r", encoding="utf-8") as unique_words_file:
-        return set(unique_words_file.read().split())
+        for raw in unique_words_file.read().split():
+            word = normalize_keyword(raw)
+            if word:
+                words.add(word)
+    return words
 
 
-def extract_keywords(sentence, keyword_file=None):
-    unique_words = load_keyword_set(keyword_file)
-    matching_positions = []
-    for position, word in enumerate(sentence.split()):
-        normalized = re.sub(r"^[^a-z0-9-]+|[^a-z0-9-]+$", "", word.lower())
-        if normalized and normalized in unique_words:
-            matching_positions.append(position)
-    return matching_positions
+def keyword_bpe_spans(caption, tokenizer, keyword_file=None, text_length=77):
+    """Keyword spans aligned with CLIP encode, including every BPE piece.
+
+    Indices are positions in the padded caption tensor: 0 is <|startoftext|>
+    and the last kept slot is reserved for <|endoftext|>.
+    """
+    keywords = load_keyword_set(keyword_file)
+    spans = []
+    index = 1
+    limit = text_length - 1
+    for surface, ids in tokenizer.encode_pieces(caption):
+        n = len(ids)
+        if index + n > limit:
+            break
+        normalized = normalize_keyword(surface)
+        if normalized and normalized in keywords:
+            spans.append(list(range(index, index + n)))
+        index += n
+    return spans
 
 
 @lru_cache()
@@ -145,12 +168,19 @@ class SimpleTokenizer(object):
         self.cache[token] = word
         return word
 
+    def encode_pieces(self, text):
+        text = whitespace_clean(basic_clean(text)).lower()
+        pieces = []
+        for token in re.findall(self.pat, text):
+            byte_token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
+            ids = [self.encoder[bpe_token] for bpe_token in self.bpe(byte_token).split(' ')]
+            pieces.append((token, ids))
+        return pieces
+
     def encode(self, text):
         bpe_tokens = []
-        text = whitespace_clean(basic_clean(text)).lower()
-        for token in re.findall(self.pat, text):
-            token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
-            bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
+        for _, ids in self.encode_pieces(text):
+            bpe_tokens.extend(ids)
         return bpe_tokens
 
     def decode(self, tokens):

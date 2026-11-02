@@ -12,7 +12,7 @@ from utils.iotools import load_train_configs
 import random
 import matplotlib.pyplot as plt
 from PIL import Image
-from datasets.cuhkpedes import CUHKPEDES
+from datasets.build import __factory
 
 
 config_file  = '/xxx/configs.yaml'
@@ -20,8 +20,8 @@ args = load_train_configs(config_file)
 args.batch_size = 1024
 args.training = False
 device = "cuda"
-test_img_loader, test_txt_loader = build_dataloader(args)
-model = build_model(args)
+test_img_loader, test_txt_loader, num_classes = build_dataloader(args)
+model = build_model(args, num_classes=num_classes)
 checkpointer = Checkpointer(model)
 checkpointer.load(f=op.join(args.output_dir, 'best.pth'))
 model.to(device)
@@ -36,19 +36,19 @@ similarity = qfeats @ gfeats.t()
 # acclerate sort with topk
 _, indices = torch.topk(similarity, k=10, dim=1, largest=True, sorted=True)  # q * topk
 
-dataset = CUHKPEDES(root='./data')
+dataset = __factory[args.dataset_name](root=args.root_dir)
 test_dataset = dataset.test
 
 img_paths = test_dataset['img_paths']
 captions = test_dataset['captions']
-gt_img_paths = test_dataset['gt_img_paths']
+image_pids = test_dataset['image_pids']
 
-def get_one_query_caption_and_result_by_id(idx, indices, qids, gids, captions, img_paths, gt_img_paths):
+def get_one_query_caption_and_result_by_id(idx, indices, qids, gids, captions, img_paths, image_pids):
     query_caption = captions[idx]
     query_id = qids[idx]
     image_paths = [img_paths[j] for j in indices[idx]]
     image_ids = gids[indices[idx]]
-    gt_image_path = gt_img_paths[idx]
+    gt_image_path = img_paths[image_pids.index(int(query_id))]
     return query_id, image_ids, query_caption, image_paths, gt_image_path
 
 def plot_retrieval_images(query_id, image_ids, query_caption, image_paths, gt_img_path, fname=None):
@@ -93,5 +93,5 @@ def plot_retrieval_images(query_id, image_ids, query_caption, image_paths, gt_im
     if fname:
         plt.savefig(fname, dpi=300)
 # idx is the index of qids(A list of query ids, range from 0 - len(qids))
-query_id, image_ids, query_caption, image_paths, gt_img_path = get_one_query_caption_and_result_by_id(0, indices, qids, gids, captions, img_paths, gt_img_paths)
+query_id, image_ids, query_caption, image_paths, gt_img_path = get_one_query_caption_and_result_by_id(0, indices, qids, gids, captions, img_paths, image_pids)
 plot_retrieval_images(query_id, image_ids, query_caption, image_paths, gt_img_path)

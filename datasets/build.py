@@ -1,4 +1,5 @@
 import logging
+import os.path as op
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -10,14 +11,15 @@ from utils.comm import get_world_size
 
 from .bases import ImageDataset, TextDataset, ImageTextDataset, ImageTextMLMDataset
 
-from .cuhkpedes import CUHKPEDES
-from .icfgpedes import ICFGPEDES
-from .rstpreid import RSTPReid
+from .rsicd import RSICD
+from .rsitmd import RSITMD
+from .sydney import Sydney
+from .ucm import UCM
 
-__factory = {'CUHK-PEDES': CUHKPEDES, 'ICFG-PEDES': ICFGPEDES, 'RSTPReid': RSTPReid}
+__factory = {'RSICD': RSICD, 'RSITMD': RSITMD, 'Sydney': Sydney, 'UCM': UCM}
 
 
-def build_transforms(img_size=(384, 128), aug=False, is_train=True):
+def build_transforms(img_size=(256, 256), aug=False, is_train=True):
     height, width = img_size
 
     mean = [0.48145466, 0.4578275, 0.40821073]
@@ -68,6 +70,25 @@ def collate(batch):
 
     return batch_tensor_dict
 
+_DATASET_KEYWORDS = {
+    'RSICD': 'RSICD_keyword_512_refined.txt',
+    'RSITMD': 'RSITMD_keyword_512_refined.txt',
+}
+
+
+def _resolve_keyword_file(args, use_amlm):
+    keyword_file = getattr(args, 'keyword_file', '') or ''
+    if not keyword_file:
+        name = _DATASET_KEYWORDS.get(args.dataset_name)
+        if name:
+            keyword_file = op.join(op.dirname(op.abspath(__file__)), '..', 'data', name)
+    if use_amlm and not keyword_file:
+        raise RuntimeError(
+            "No keyword file for dataset '{}'. RSICD and RSITMD have vocabularies; pass --keyword_file for other datasets.".format(
+                args.dataset_name))
+    return keyword_file or None
+
+
 def build_dataloader(args, tranforms=None):
     logger = logging.getLogger("IRRA.dataset")
 
@@ -86,13 +107,14 @@ def build_dataloader(args, tranforms=None):
         use_mlm = 'mlm' in tasks
         use_amlm = 'amlm' in tasks
         if args.MLM or use_mlm or use_amlm:
-            keyword_file = getattr(args, "keyword_file", "") or None
+            keyword_file = _resolve_keyword_file(args, use_amlm)
             train_set = ImageTextMLMDataset(dataset.train,
                                      train_transforms,
                                      text_length=args.text_length,
                                      use_mlm=use_mlm,
                                      use_amlm=use_amlm,
-                                     keyword_file=keyword_file)
+                                     keyword_file=keyword_file,
+                                     amlm_keyword_mask_ratio=args.amlm_keyword_mask_ratio)
         else:
             train_set = ImageTextDataset(dataset.train,
                                      train_transforms,

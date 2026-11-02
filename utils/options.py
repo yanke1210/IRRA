@@ -9,6 +9,7 @@ def get_args():
     parser.add_argument("--output_dir", default="logs")
     parser.add_argument("--log_period", default=100)
     parser.add_argument("--eval_period", default=1)
+    parser.add_argument("--patience", default=15, type=int, help="stop after this many epochs without a better bidirectional mR")
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
@@ -26,14 +27,25 @@ def get_args():
     parser.add_argument("--MLM", default=False, action='store_true', help="whether to use Mask Language Modeling dataset")
 
     ######################## loss settings ########################
-    parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'amlm', 'cmpm', 'id', 'itc', 'sdm']")
+    parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'amlm', 'cmpm', 'id', 'itc', 'sdm', 'tc']")
     parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="implicit MLM loss weight")
     parser.add_argument("--amlm_loss_weight", type=float, default=0.5, help="explicit keyword MLM loss weight")
-    parser.add_argument("--keyword_file", default="", help="keyword list for explicit MLM; empty uses data/merged_keywords_tfidf.txt")
+    parser.add_argument("--keyword_file", default="", help="keyword list for explicit MLM; empty uses the dataset vocab for RSICD/RSITMD")
+    parser.add_argument("--amlm_keyword_mask_ratio", type=float, default=0.5, help="probability of masking each matched keyword span")
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
+    parser.add_argument("--tc_loss_weight", type=float, default=1.0, help="TC loss weight")
+    parser.add_argument("--tc_teacher_temperature", type=float, default=0.07, help="momentum teacher softmax temperature")
+    parser.add_argument("--tc_soft_weight_end", type=float, default=0.3, help="final weight of the teacher soft target")
+    parser.add_argument("--tc_momentum", type=float, default=0.995, help="EMA momentum of the TC teacher")
+    parser.add_argument("--tc_image_gamma", type=float, default=2.0)
+    parser.add_argument("--tc_text_gamma", type=float, default=2.0)
+    parser.add_argument("--tc_max_gamma", type=float, default=5.0)
+    parser.add_argument("--tc_min_gamma", type=float, default=-1.0)
+    parser.add_argument("--tc_gamma_alpha", type=float, default=0.1)
+    parser.add_argument("--tc_num_bins", type=int, default=15, help="bins for TC calibration gap")
     
     ######################## vison trainsformer settings ########################
-    parser.add_argument("--img_size", type=tuple, default=(384, 128))
+    parser.add_argument("--img_size", type=tuple, default=(256, 256))
     parser.add_argument("--stride_size", type=int, default=16)
 
     ######################## text transformer settings ########################
@@ -62,7 +74,7 @@ def get_args():
     parser.add_argument("--power", type=float, default=0.9)
 
     ######################## dataset ########################
-    parser.add_argument("--dataset_name", default="CUHK-PEDES", help="[CUHK-PEDES, ICFG-PEDES, RSTPReid]")
+    parser.add_argument("--dataset_name", default="RSICD", help="[RSICD, RSITMD, Sydney, UCM]")
     parser.add_argument("--sampler", default="random", help="choose sampler from [idtentity, random]")
     parser.add_argument("--num_instance", type=int, default=4)
     parser.add_argument("--root_dir", default="./data")
