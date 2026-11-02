@@ -22,7 +22,7 @@ from utils.keyword_statistic import (
     load_annos,
     resolve_anno_path,
 )
-from utils.simple_tokenizer import SimpleTokenizer, extract_keywords
+from utils.simple_tokenizer import SimpleTokenizer, extract_keyword_token_spans
 
 
 def parse_args():
@@ -44,15 +44,15 @@ def count_dataset(name, json_names, root_dir, mapper):
     zero_hits = 0
     mapped_empty = 0
     for caption in captions:
-        keyword_positions = extract_keywords(caption)
-        if not keyword_positions:
+        keyword_spans = extract_keyword_token_spans(caption, mapper.tokenizer)
+        if not keyword_spans:
             zero_hits += 1
             continue
         caption_tokens = clip_tokenize(
             caption, tokenizer=mapper.tokenizer, text_length=77, truncate=True)
-        token_positions = mapper._map_keyword_positions_to_tokens(
-            keyword_positions, caption_tokens)
-        if not token_positions:
+        token_spans = mapper._map_keyword_spans_to_tokens(
+            keyword_spans, caption_tokens)
+        if not token_spans:
             mapped_empty += 1
 
     total = len(captions)

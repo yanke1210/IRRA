@@ -20,15 +20,21 @@ def get_args():
 
     ## cross modal transfomer setting
     parser.add_argument("--cmt_depth", type=int, default=4, help="cross modal transformer self attn layers")
-    parser.add_argument("--masked_token_rate", type=float, default=0.8, help="masked token rate for mlm task")
+    parser.add_argument("--mlm_probability", type=float, default=0.15, help="probability of selecting a token for MLM")
+    parser.add_argument("--masked_token_rate", type=float, default=0.8, help="probability of replacing a selected token with mask")
     parser.add_argument("--masked_token_unchanged_rate", type=float, default=0.1, help="masked token unchanged rate")
     parser.add_argument("--lr_factor", type=float, default=5.0, help="lr factor for random init self implement module")
     parser.add_argument("--MLM", default=False, action='store_true', help="whether to use Mask Language Modeling dataset")
 
     ######################## loss settings ########################
-    parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'amlm', 'cmpm', 'id', 'itc', 'sdm']")
+    parser.add_argument("--loss_names", default='amlm+ot+sdm+mlm', help="losses/tasks; ker=amlm+ot, irr=sdm+mlm")
     parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="implicit MLM loss weight")
     parser.add_argument("--amlm_loss_weight", type=float, default=0.5, help="explicit keyword MLM loss weight")
+    parser.add_argument("--ot_loss_weight", type=float, default=1.0, help="local keyword-to-patch OT loss weight")
+    parser.add_argument("--ot_epsilon", type=float, default=0.1, help="entropy regularization for OT")
+    parser.add_argument("--ot_sinkhorn_iterations", type=int, default=20, help="Sinkhorn iterations for OT")
+    parser.add_argument("--ot_partial_ratio", type=float, default=0.25, help="fraction of locally relevant patches retained by partial OT")
+    parser.add_argument("--ot_margin", type=float, default=0.2, help="margin for positive-vs-hard-negative OT ranking")
     parser.add_argument("--keyword_file", default="", help="keyword list for explicit MLM; empty uses data/merged_keywords_tfidf.txt")
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     

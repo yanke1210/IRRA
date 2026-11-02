@@ -36,6 +36,35 @@ def extract_keywords(sentence, keyword_file=None):
     return matching_positions
 
 
+def extract_keyword_token_spans(sentence, tokenizer, keyword_file=None):
+    """Return CLIP-BPE spans for keyword words.
+
+    The returned half-open spans index ``tokenizer.encode(sentence)`` (that is,
+    they do not include the start-of-text token).  A whitespace-delimited word
+    may contain several BPE tokens; all BPE pieces of its normalized lexical
+    content are included while surrounding punctuation is excluded.
+    """
+    unique_words = load_keyword_set(keyword_file)
+    cleaned = whitespace_clean(basic_clean(sentence)).lower()
+    spans = []
+    token_offset = 0
+
+    for raw_word in cleaned.split():
+        full_ids = tokenizer.encode(raw_word)
+        match = re.match(r"^([^a-z0-9-]*)(.*?)([^a-z0-9-]*)$", raw_word)
+        if match is not None:
+            prefix, normalized, _ = match.groups()
+            if normalized and normalized in unique_words:
+                prefix_length = len(tokenizer.encode(prefix)) if prefix else 0
+                keyword_length = len(tokenizer.encode(normalized))
+                if keyword_length:
+                    start = token_offset + prefix_length
+                    spans.append((start, start + keyword_length))
+        token_offset += len(full_ids)
+
+    return spans
+
+
 @lru_cache()
 def bytes_to_unicode():
     """

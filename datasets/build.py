@@ -83,6 +83,10 @@ def build_dataloader(args, tranforms=None):
                                           is_train=False)
 
         tasks = [t.strip() for t in args.loss_names.split('+')]
+        if 'ker' in tasks:
+            tasks.extend(['amlm', 'ot'])
+        if 'irr' in tasks:
+            tasks.extend(['sdm', 'mlm'])
         use_mlm = 'mlm' in tasks
         use_amlm = 'amlm' in tasks
         if args.MLM or use_mlm or use_amlm:
@@ -92,7 +96,10 @@ def build_dataloader(args, tranforms=None):
                                      text_length=args.text_length,
                                      use_mlm=use_mlm,
                                      use_amlm=use_amlm,
-                                     keyword_file=keyword_file)
+                                     keyword_file=keyword_file,
+                                     mlm_probability=args.mlm_probability,
+                                     masked_token_rate=args.masked_token_rate,
+                                     masked_token_unchanged_rate=args.masked_token_unchanged_rate)
         else:
             train_set = ImageTextDataset(dataset.train,
                                      train_transforms,

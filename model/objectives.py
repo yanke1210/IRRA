@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,6 +50,122 @@ def compute_mlm(scores, labels):
         return scores.new_zeros(())
     ce = nn.CrossEntropyLoss(ignore_index=0)
     return ce(scores, labels)
+
+
+def _partial_ot_distance(keyword_features, patch_features, partial_ratio,
+                         epsilon, sinkhorn_iterations):
+    """Sinkhorn distance after retaining the most relevant patch subset."""
+    keyword_features = F.normalize(keyword_features.float(), dim=-1)
+    patch_features = F.normalize(patch_features.float(), dim=-1)
+    cost = (1.0 - keyword_features @ patch_features.t()).clamp_min(0.0)
+
+    num_patches = cost.shape[1]
+    num_selected = max(1, min(num_patches,
+                              int(math.ceil(num_patches * partial_ratio))))
+    patch_relevance = cost.min(dim=0).values
+    selected = patch_relevance.topk(num_selected, largest=False).indices
+    cost = cost[:, selected]
+
+    keyword_mass = cost.new_full((cost.shape[0],), 1.0 / cost.shape[0])
+    patch_mass = cost.new_full((cost.shape[1],), 1.0 / cost.shape[1])
+    kernel = torch.exp(-cost / max(epsilon, 1e-6)).clamp_min(1e-12)
+    transport = kernel / kernel.sum().clamp_min(1e-12)
+    for _ in range(sinkhorn_iterations):
+        transport = transport * (
+            keyword_mass / transport.sum(dim=1).clamp_min(1e-12)).unsqueeze(1)
+        transport = transport * (
+            patch_mass / transport.sum(dim=0).clamp_min(1e-12)).unsqueeze(0)
+    return (transport * cost).sum()
+
+
+def compute_ot(keyword_features, patch_features, keyword_mask=None,
+               patch_mask=None, pids=None, epsilon=0.1,
+               sinkhorn_iterations=20, partial_ratio=0.25, margin=0.2):
+    """Bidirectional hard-negative partial OT ranking loss.
+
+    Keyword features must be text-only representations (before cross-modal
+    attention).  Hard negatives are selected in-batch after excluding samples
+    with the same person identity.
+    """
+    if keyword_features.ndim != 3 or patch_features.ndim != 3:
+        raise ValueError("OT features must have shape [batch, tokens, dimension]")
+    if not 0.0 < partial_ratio <= 1.0:
+        raise ValueError("partial_ratio must be in (0, 1]")
+
+    batch_size = keyword_features.shape[0]
+    if keyword_mask is None:
+        keyword_mask = torch.ones(keyword_features.shape[:2], dtype=torch.bool,
+                                  device=keyword_features.device)
+    if patch_mask is None:
+        patch_mask = torch.ones(patch_features.shape[:2], dtype=torch.bool,
+                                device=patch_features.device)
+
+    valid_keywords = []
+    valid_patches = []
+    for batch_index in range(batch_size):
+        keyword_valid = keyword_features[batch_index][keyword_mask[batch_index]]
+        patch_valid = patch_features[batch_index][patch_mask[batch_index]]
+        valid_keywords.append(keyword_valid)
+        valid_patches.append(patch_valid)
+
+    usable = [
+        index for index in range(batch_size)
+        if valid_keywords[index].shape[0] and valid_patches[index].shape[0]
+    ]
+    if len(usable) < 2:
+        return keyword_features.sum() * 0.0
+
+    if pids is None:
+        pids = torch.arange(batch_size, device=keyword_features.device)
+    else:
+        pids = pids.reshape(-1)
+
+    # Coarse text/patch similarity only chooses the hard-negative indices.  OT
+    # itself remains the optimized fine-grained distance.
+    text_pooled = torch.stack([
+        F.normalize(valid_keywords[i].float(), dim=-1).mean(dim=0)
+        if valid_keywords[i].shape[0] else keyword_features.new_zeros(keyword_features.shape[-1]).float()
+        for i in range(batch_size)
+    ])
+    image_pooled = torch.stack([
+        F.normalize(valid_patches[i].float(), dim=-1).mean(dim=0)
+        if valid_patches[i].shape[0] else patch_features.new_zeros(patch_features.shape[-1]).float()
+        for i in range(batch_size)
+    ])
+    coarse_similarity = F.normalize(text_pooled, dim=-1) @ F.normalize(image_pooled, dim=-1).t()
+    invalid_negative = pids[:, None].eq(pids[None, :])
+    unusable = torch.ones(batch_size, dtype=torch.bool,
+                          device=keyword_features.device)
+    unusable[usable] = False
+    invalid_negative = invalid_negative | unusable[:, None] | unusable[None, :]
+    coarse_similarity = coarse_similarity.masked_fill(invalid_negative, float("-inf"))
+
+    losses = []
+    for index in usable:
+        if torch.isneginf(coarse_similarity[index]).all():
+            continue
+        negative_image = coarse_similarity[index].argmax().item()
+        negative_text = coarse_similarity[:, index].argmax().item()
+        if (valid_patches[negative_image].shape[0] == 0 or
+                valid_keywords[negative_text].shape[0] == 0):
+            continue
+
+        positive = _partial_ot_distance(
+            valid_keywords[index], valid_patches[index], partial_ratio,
+            epsilon, sinkhorn_iterations)
+        text_to_image_negative = _partial_ot_distance(
+            valid_keywords[index], valid_patches[negative_image], partial_ratio,
+            epsilon, sinkhorn_iterations)
+        image_to_text_negative = _partial_ot_distance(
+            valid_keywords[negative_text], valid_patches[index], partial_ratio,
+            epsilon, sinkhorn_iterations)
+        losses.append(0.5 * (
+            F.relu(margin + positive - text_to_image_negative) +
+            F.relu(margin + positive - image_to_text_negative)))
+
+    if not losses:
+        return keyword_features.sum() * 0.0
+    return torch.stack(losses).mean()
 
 
 def compute_itc(image_features, text_features, logit_scale):

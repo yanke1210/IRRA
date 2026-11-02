@@ -8,5 +8,5 @@ python train.py \
 --batch_size 64 \
 --MLM \
 --dataset_name $DATASET_NAME \
---loss_names 'sdm+mlm+id' \
+--loss_names 'ker+irr+id' \
 --num_epoch 60

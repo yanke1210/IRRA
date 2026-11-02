@@ -62,8 +62,14 @@ class IRRA(nn.Module):
     def _set_task(self):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
+        if 'ker' in self.current_task:
+            self.current_task.extend(['amlm', 'ot'])
+        if 'irr' in self.current_task:
+            self.current_task.extend(['sdm', 'mlm'])
+        self.current_task = list(dict.fromkeys(self.current_task))
         self.use_mlm = 'mlm' in self.current_task
         self.use_amlm = 'amlm' in self.current_task
+        self.use_ot = 'ot' in self.current_task
         print(f'Training Model with {self.current_task} tasks')
     
     
@@ -134,7 +140,9 @@ class IRRA(nn.Module):
             ret.update({'mlm_acc': self._masked_token_acc(mlm_scores, mlm_labels)})
 
         if self.use_amlm:
-            amlm_scores = self._mlm_scores(batch['amlm_ids'], image_feats)
+            amlm_text_feats = self.base_model.encode_text(batch['amlm_ids'])
+            amlm_hidden = self.cross_former(amlm_text_feats, image_feats, image_feats)
+            amlm_scores = self.mlm_head(amlm_hidden).float().reshape(-1, self.args.vocab_size)
             amlm_labels = batch['amlm_labels'].reshape(-1)
             ret.update({
                 'amlm_loss': objectives.compute_mlm(amlm_scores, amlm_labels)
@@ -142,13 +150,63 @@ class IRRA(nn.Module):
             })
             ret.update({'amlm_acc': self._masked_token_acc(amlm_scores, amlm_labels)})
 
+            if self.use_ot:
+                ot_text_feats = self.base_model.encode_text(batch['ot_ids'])
+                keyword_feats, keyword_mask = self._pool_keyword_spans(
+                    ot_text_feats, batch['keyword_groups'])
+                patch_feats = image_feats[:, 1:, :]
+                ret.update({
+                    'ot_loss': objectives.compute_ot(
+                        keyword_feats, patch_feats, keyword_mask=keyword_mask,
+                        pids=batch['pids'],
+                        epsilon=getattr(self.args, 'ot_epsilon', 0.1),
+                        sinkhorn_iterations=getattr(
+                            self.args, 'ot_sinkhorn_iterations', 20),
+                        partial_ratio=getattr(
+                            self.args, 'ot_partial_ratio', 0.25),
+                        margin=getattr(self.args, 'ot_margin', 0.2),
+                    ) * getattr(self.args, 'ot_loss_weight', 1.0)
+                })
+
         return ret
 
     def _mlm_scores(self, mlm_ids, image_feats):
-        mlm_feats = self.base_model.encode_text(mlm_ids)
-        x = self.cross_former(mlm_feats, image_feats, image_feats)
+        x = self._mlm_features(mlm_ids, image_feats)
         x = self.mlm_head(x)
         return x.float().reshape(-1, self.args.vocab_size)
+
+    def _mlm_features(self, mlm_ids, image_feats):
+        mlm_feats = self.base_model.encode_text(mlm_ids)
+        x = self.cross_former(mlm_feats, image_feats, image_feats)
+        return x
+
+    @staticmethod
+    def _pool_keyword_spans(text_feats, keyword_groups):
+        """Pool all BPE pieces belonging to the same keyword word."""
+        batch_keywords = []
+        lengths = []
+        for features, groups in zip(text_feats, keyword_groups):
+            pooled = [
+                features[groups == group_id].mean(dim=0)
+                for group_id in range(1, int(groups.max().item()) + 1)
+            ]
+            lengths.append(len(pooled))
+            if pooled:
+                batch_keywords.append(torch.stack(pooled))
+            else:
+                batch_keywords.append(features.new_zeros((0, features.shape[-1])))
+
+        max_keywords = max(max(lengths), 1)
+        output = text_feats.new_zeros(
+            (text_feats.shape[0], max_keywords, text_feats.shape[-1]))
+        mask = torch.zeros(
+            (text_feats.shape[0], max_keywords), dtype=torch.bool,
+            device=text_feats.device)
+        for index, pooled in enumerate(batch_keywords):
+            if pooled.shape[0]:
+                output[index, :pooled.shape[0]] = pooled
+                mask[index, :pooled.shape[0]] = True
+        return output, mask
 
     def _masked_token_acc(self, scores, labels):
         pred = scores.max(1)[1]

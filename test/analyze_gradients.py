@@ -2,7 +2,8 @@
 
 Loads configs.yaml + best.pth from a run directory, then measures each
 task's gradient on the shared CLIP backbone (base_model) over train
-batches. Prints mean L2 norms and pairwise cosine similarities.
+batches. Prints mean L2 norms, pairwise cosine similarities, and an
+explicit IRR-vs-KER gradient-conflict summary.
 
 Example:
     python test/analyze_gradients.py --output_dir logs/RSTPReid/<run_dir>
@@ -25,7 +26,13 @@ from model import build_model
 from utils.checkpoint import Checkpointer
 from utils.iotools import load_train_configs
 
-LOSS_KEYS = ("sdm_loss", "id_loss", "mlm_loss", "amlm_loss", "itc_loss")
+LOSS_KEYS = (
+    "sdm_loss", "id_loss", "mlm_loss", "amlm_loss", "ot_loss", "itc_loss"
+)
+GROUPS = {
+    "irr": ("sdm_loss", "mlm_loss"),
+    "ker": ("amlm_loss", "ot_loss"),
+}
 
 
 def parse_args():
@@ -99,6 +106,9 @@ def analyze(model, train_loader, device, num_batches):
 
     norm_sums = {}
     cos_sums = {}
+    group_norm_sums = {name: 0.0 for name in GROUPS}
+    irr_ker_cosines = []
+    irr_ker_dots = []
     used_keys = None
     n_used = 0
 
@@ -133,6 +143,26 @@ def analyze(model, train_loader, device, num_batches):
                 ).item()
                 cos_sums[pair] = cos_sums.get(pair, 0.0) + cos
 
+        # IRR and KER are composite objectives. Since their configured loss
+        # weights are already applied in model.forward(), summing the component
+        # gradients gives the gradient used by each complete objective.
+        missing = {
+            name: [key for key in members if key not in grads]
+            for name, members in GROUPS.items()
+        }
+        if not any(missing.values()):
+            group_grads = {
+                name: sum((grads[key] for key in members), torch.zeros_like(next(iter(grads.values()))))
+                for name, members in GROUPS.items()
+            }
+            for name, vec in group_grads.items():
+                group_norm_sums[name] += vec.norm().item()
+            irr_grad = group_grads["irr"]
+            ker_grad = group_grads["ker"]
+            irr_ker_cosines.append(F.cosine_similarity(
+                irr_grad.unsqueeze(0), ker_grad.unsqueeze(0)).item())
+            irr_ker_dots.append(torch.dot(irr_grad, ker_grad).item())
+
         n_used += 1
         print("batch {}/{} losses: {}".format(
             n_used, num_batches,
@@ -143,7 +173,20 @@ def analyze(model, train_loader, device, num_batches):
 
     mean_norms = {k: v / n_used for k, v in norm_sums.items()}
     mean_cos = {k: v / n_used for k, v in cos_sums.items()}
-    return used_keys, n_used, mean_norms, mean_cos
+    group_result = None
+    if irr_ker_cosines:
+        conflict_count = sum(value < 0 for value in irr_ker_cosines)
+        group_result = {
+            "irr_grad_norm": group_norm_sums["irr"] / len(irr_ker_cosines),
+            "ker_grad_norm": group_norm_sums["ker"] / len(irr_ker_cosines),
+            "mean_cosine": sum(irr_ker_cosines) / len(irr_ker_cosines),
+            "mean_dot_product": sum(irr_ker_dots) / len(irr_ker_dots),
+            "conflict_batches": conflict_count,
+            "conflict_rate": conflict_count / len(irr_ker_cosines),
+            "min_cosine": min(irr_ker_cosines),
+            "max_cosine": max(irr_ker_cosines),
+        }
+    return used_keys, n_used, mean_norms, mean_cos, group_result
 
 
 def print_tables(keys, mean_norms, mean_cos):
@@ -161,6 +204,32 @@ def print_tables(keys, mean_norms, mean_cos):
             cos_table.add_row([a, b, value])
         print("\nMean pairwise cosine on backbone gradients")
         print(cos_table)
+
+
+def print_group_conflict(group_result):
+    print("\nIRR vs KER backbone gradient conflict")
+    if group_result is None:
+        missing = sorted(set(GROUPS["irr"] + GROUPS["ker"]))
+        print("Unavailable: requires all component losses: {}".format(
+            ", ".join(missing)))
+        return
+
+    table = PrettyTable(["metric", "value"])
+    table.add_row(["||g_IRR||", "{:.4f}".format(group_result["irr_grad_norm"])])
+    table.add_row(["||g_KER||", "{:.4f}".format(group_result["ker_grad_norm"])])
+    table.add_row(["mean cosine", "{:.4f}".format(group_result["mean_cosine"])])
+    table.add_row(["mean dot product", "{:.4e}".format(group_result["mean_dot_product"])])
+    table.add_row(["cosine range", "[{:.4f}, {:.4f}]".format(
+        group_result["min_cosine"], group_result["max_cosine"])])
+    table.add_row(["conflict batches", "{} ({:.1%})".format(
+        group_result["conflict_batches"], group_result["conflict_rate"])])
+    print(table)
+    if group_result["mean_cosine"] < 0:
+        print("Conclusion: IRR and KER conflict on average (mean cosine < 0).")
+    elif group_result["conflict_batches"]:
+        print("Conclusion: no average conflict, but some batches conflict (cosine < 0).")
+    else:
+        print("Conclusion: no IRR/KER conflict was observed in the sampled batches.")
 
 
 def main():
@@ -184,7 +253,7 @@ def main():
     Checkpointer(model).load(f=ckpt_path)
     model.to(device)
 
-    keys, n_used, mean_norms, mean_cos = analyze(
+    keys, n_used, mean_norms, mean_cos, group_result = analyze(
         model, train_loader, device, cli.num_batches)
 
     print("\nRun: {}".format(output_dir))
@@ -192,6 +261,7 @@ def main():
     print("loss_names: {}".format(args.loss_names))
     print("batches: {}".format(n_used))
     print_tables(keys, mean_norms, mean_cos)
+    print_group_conflict(group_result)
 
     result = {
         "output_dir": output_dir,
@@ -200,6 +270,7 @@ def main():
         "num_batches": n_used,
         "grad_norms": mean_norms,
         "cosine": {"{},{}".format(a, b): v for (a, b), v in mean_cos.items()},
+        "irr_vs_ker": group_result,
     }
     json_path = os.path.join(output_dir, "grad_analysis.json")
     with open(json_path, "w", encoding="utf-8") as f:

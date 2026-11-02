@@ -7,7 +7,7 @@ from utils.iotools import read_image
 from utils.simple_tokenizer import (
     SimpleTokenizer,
     default_keyword_file,
-    extract_keywords,
+    extract_keyword_token_spans,
     load_keyword_set,
 )
 from prettytable import PrettyTable
@@ -141,7 +141,10 @@ class ImageTextMLMDataset(Dataset):
                  truncate: bool = True,
                  use_mlm: bool = True,
                  use_amlm: bool = False,
-                 keyword_file=None):
+                 keyword_file=None,
+                 mlm_probability: float = 0.15,
+                 masked_token_rate: float = 0.8,
+                 masked_token_unchanged_rate: float = 0.1):
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
@@ -149,6 +152,9 @@ class ImageTextMLMDataset(Dataset):
         self.use_mlm = use_mlm
         self.use_amlm = use_amlm
         self.keyword_file = osp.abspath(keyword_file) if keyword_file else default_keyword_file()
+        self.mlm_probability = mlm_probability
+        self.masked_token_rate = masked_token_rate
+        self.masked_token_unchanged_rate = masked_token_unchanged_rate
 
         self.tokenizer = SimpleTokenizer()
 
@@ -178,18 +184,22 @@ class ImageTextMLMDataset(Dataset):
         }
 
         if self.use_amlm:
-            keyword_positions = extract_keywords(
-                caption, keyword_file=self.keyword_file)
-            token_positions = self._map_keyword_positions_to_tokens(
-                keyword_positions, caption_tokens)
+            keyword_spans = extract_keyword_token_spans(
+                caption, self.tokenizer, keyword_file=self.keyword_file)
+            token_spans = self._map_keyword_spans_to_tokens(
+                keyword_spans, caption_tokens)
+            token_positions = [position for span in token_spans for position in span]
             amlm_tokens, amlm_labels = self._build_attribute_masked_tokens_and_labels(
                 clean_token_ids.copy(), token_positions)
+            keyword_groups = torch.zeros(len(caption_tokens), dtype=torch.long)
+            for group_id, token_span in enumerate(token_spans, start=1):
+                keyword_groups[token_span] = group_id
             ret['amlm_ids'] = amlm_tokens
             ret['amlm_labels'] = amlm_labels
+            ret['keyword_groups'] = keyword_groups
+            ret['ot_ids'] = torch.tensor(clean_token_ids.copy())
 
         if self.use_mlm:
-            # Preserve the original IRRA behavior: numpy() shares storage with
-            # caption_tokens, so random MLM masking also becomes the ITC input.
             mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(
                 caption_tokens.cpu().numpy())
             ret['mlm_ids'] = mlm_tokens
@@ -197,21 +207,24 @@ class ImageTextMLMDataset(Dataset):
 
         return ret
 
-    def _map_keyword_positions_to_tokens(self, keyword_positions, caption_tokens):
+    def _map_keyword_spans_to_tokens(self, keyword_spans, caption_tokens):
         sot = self.tokenizer.encoder["<|startoftext|>"]
         eot = self.tokenizer.encoder["<|endoftext|>"]
         mask = self.tokenizer.encoder["<|mask|>"]
         token_ids = caption_tokens.tolist()
-        mapped = []
-        for position in keyword_positions:
-            token_pos = position + 1  # skip <|startoftext|>
-            if token_pos >= len(token_ids):
-                continue
-            tok = token_ids[token_pos]
-            if tok == 0 or tok in (sot, eot, mask):
-                continue
-            mapped.append(token_pos)
-        return mapped
+        mapped_spans = []
+        for start, end in keyword_spans:
+            mapped = []
+            for token_pos in range(start + 1, end + 1):  # skip SOT
+                if token_pos >= len(token_ids):
+                    break
+                tok = token_ids[token_pos]
+                if tok == 0 or tok in (sot, eot, mask):
+                    continue
+                mapped.append(token_pos)
+            if mapped:
+                mapped_spans.append(mapped)
+        return mapped_spans
 
     def _build_attribute_masked_tokens_and_labels(self, tokens, attribute_position):
         mask = self.tokenizer.encoder["<|mask|>"]
@@ -234,21 +247,15 @@ class ImageTextMLMDataset(Dataset):
         for i, token in enumerate(tokens):
             if 0 < token < 49405:
                 prob = random.random()
-                # mask token with 15% probability
-                if prob < 0.15:
-                    prob /= 0.15
+                if prob < self.mlm_probability:
+                    prob /= self.mlm_probability
 
-                    # 80% randomly change token to mask token
-                    if prob < 0.8:
+                    if prob < self.masked_token_rate:
                         tokens[i] = mask
 
-                    # 10% randomly change token to random token
-                    elif prob < 0.9:
+                    elif prob < self.masked_token_rate + self.masked_token_unchanged_rate:
                         tokens[i] = random.choice(token_range)
 
-                    # -> rest 10% randomly keep current token
-
-                    # append current token to output (we will predict these later)
                     labels.append(token)
                 else:
                     # no masking token (will be ignored by loss function later)
@@ -258,7 +265,10 @@ class ImageTextMLMDataset(Dataset):
         
         if all(l == 0 for l in labels):
             # at least mask 1
-            labels[1] = tokens[1]
-            tokens[1] = mask
+            for position, token in enumerate(tokens):
+                if 0 < token < 49405:
+                    labels[position] = token
+                    tokens[position] = mask
+                    break
 
         return torch.tensor(tokens), torch.tensor(labels)
