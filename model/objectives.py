@@ -136,16 +136,14 @@ class WeightSoftCELoss(nn.Module):
         self.register_buffer('image_to_textgamma', torch.tensor(self.imagegamma))
         self.register_buffer('text_to_imagegamma', torch.tensor(self.textgamma))
 
-    def update_gamma(self, which, gap, max_change=0.2):
+    def update_gamma(self, which, gap):
         gamma = self.image_to_textgamma if which == 'i2t' else self.text_to_imagegamma
         gap = torch.as_tensor(gap, dtype=gamma.dtype, device=gamma.device)
-        exp_factor = torch.tanh(gap) + 1.0
-        target = torch.clamp(gamma * exp_factor, self.mingamma, self.maxgamma)
-        delta = torch.clamp(target - gamma, -max_change, max_change)
-        new_gamma = gamma + delta
-        base_gamma = self.imagegamma if which == 'i2t' else self.textgamma
-        if abs(base_gamma) < abs(self.alpha * self.imagegamma):
-            new_gamma = gamma.new_tensor(-self.alpha * self.imagegamma)
+        if float(gamma) >= 0:
+            new_gamma = gamma * torch.exp(gap)
+        else:
+            new_gamma = gamma * torch.exp(-gap)
+        new_gamma = torch.clamp(new_gamma, self.mingamma, self.maxgamma)
         gamma.copy_(new_gamma.reshape_as(gamma))
 
     def updategamma(self, image_text_meancalibration_gap, text_image_meancalibration_gap):
