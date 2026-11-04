@@ -41,6 +41,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     best_mr = -1.0
     best_epoch = 0
     has_best = False
+    stall_validations = 0
     patience = int(getattr(args, "patience", 15))
     arguments["epoch"] = 0
 
@@ -119,10 +120,16 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     best_mr = mean_mr
                     best_epoch = epoch
                     has_best = True
+                    stall_validations = 0
                     arguments["epoch"] = epoch
                     checkpointer.save("best", **arguments)
-                elif has_best and epoch - best_epoch >= patience:
-                    stop_training = True
+                else:
+                    stall_validations += 1
+                    logger.info(
+                        "bidirectional mR did not improve: {}/{} validations (best: {:.3f} at epoch {})".format(
+                            stall_validations, patience, best_mr, best_epoch))
+                    if has_best and stall_validations >= patience:
+                        stop_training = True
             if args.distributed:
                 flag = torch.zeros(1, device=device)
                 if get_rank() == 0 and stop_training:

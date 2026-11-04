@@ -5,7 +5,7 @@ output_dir: logs
 log_period: 100
 eval_period: 1
 patience: 15
-val_dataset: test
+val_dataset: val
 resume: false
 resume_ckpt_file: ""
 
@@ -21,7 +21,7 @@ lr_factor: 5.0
 MLM: true
 
 ######################## loss settings ########################
-loss_names: sdm+id+mlm+tc
+loss_names: sdm+mlm+tc
 sdm_loss_weight: 1.0
 mlm_loss_weight: 1.0
 amlm_loss_weight: 0.5
@@ -72,7 +72,7 @@ power: 0.9
 dataset_name: RSICD
 sampler: random
 num_instance: 4
-root_dir: ./data
+root_dir: /home/coco/datasets
 batch_size: 64
 test_batch_size: 512
 num_workers: 8

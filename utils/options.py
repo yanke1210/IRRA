@@ -20,7 +20,7 @@ def get_args():
     parser.add_argument("--output_dir", default="logs")
     parser.add_argument("--log_period", default=100)
     parser.add_argument("--eval_period", default=1)
-    parser.add_argument("--patience", default=15, type=int, help="stop after this many epochs without a better bidirectional mR")
+    parser.add_argument("--patience", default=15, type=int, help="stop after this many validations without a better bidirectional mR")
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')

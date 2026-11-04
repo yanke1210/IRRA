@@ -14,12 +14,7 @@ def rank(similarity, q_pids, g_pids, max_rank=10):
     all_cmc = matches[:, :max_rank].cumsum(1) # cumulative sum
     all_cmc[all_cmc > 1] = 1
     all_cmc = all_cmc.float().mean(0) * 100
-
-    tmp_cmc = matches.cumsum(1)  # q * k
-    inp = [tmp_cmc[i][match_row.nonzero()[-1]] / (match_row.nonzero()[-1] + 1.) for i, match_row in enumerate(matches)]
-    mINP = torch.cat(inp).mean() * 100
-
-    return all_cmc, mINP, indices
+    return all_cmc
 
 
 def mean_recall(cmc):
@@ -69,26 +64,19 @@ class Evaluator():
 
         similarity = qfeats @ gfeats.t()
 
-        t2i_cmc, t2i_mINP, _ = rank(similarity=similarity, q_pids=qids, g_pids=gids, max_rank=10)
-        i2t_cmc, i2t_mINP, _ = rank(similarity=similarity.t(), q_pids=gids, g_pids=qids, max_rank=10)
+        t2i_cmc = rank(similarity=similarity, q_pids=qids, g_pids=gids, max_rank=10)
+        i2t_cmc = rank(similarity=similarity.t(), q_pids=gids, g_pids=qids, max_rank=10)
         t2i_mr = mean_recall(t2i_cmc)
         i2t_mr = mean_recall(i2t_cmc)
         bidirectional_mr = (t2i_mr + i2t_mr) / 2.0
 
-        table = PrettyTable(["task", "R1", "R5", "R10", "mR", "mINP"])
-        table.add_row(['t2i', t2i_cmc[0], t2i_cmc[4], t2i_cmc[9], t2i_mr, t2i_mINP])
-        table.add_row(['i2t', i2t_cmc[0], i2t_cmc[4], i2t_cmc[9], i2t_mr, i2t_mINP])
-        table.add_row([
-            'mean',
-            (float(t2i_cmc[0]) + float(i2t_cmc[0])) / 2.0,
-            (float(t2i_cmc[4]) + float(i2t_cmc[4])) / 2.0,
-            (float(t2i_cmc[9]) + float(i2t_cmc[9])) / 2.0,
-            bidirectional_mr,
-            (float(t2i_mINP) + float(i2t_mINP)) / 2.0,
-        ])
-        for name in ("R1", "R5", "R10", "mR", "mINP"):
+        table = PrettyTable(["task", "R1", "R5", "R10", "mR"])
+        table.add_row(['t2i', t2i_cmc[0], t2i_cmc[4], t2i_cmc[9], t2i_mr])
+        table.add_row(['i2t', i2t_cmc[0], i2t_cmc[4], i2t_cmc[9], i2t_mr])
+        for name in ("R1", "R5", "R10", "mR"):
             table.custom_format[name] = lambda f, v: f"{v:.3f}"
         self.logger.info('\n' + str(table))
+        self.logger.info("bidirectional mR: {:.3f}".format(bidirectional_mr))
 
         if num_bins:
             self.last_i2t_gap = mean_calibration_gap(
@@ -110,7 +98,7 @@ def mean_calibration_gap(scores, query_pids, gallery_pids, num_bins=15):
         return 0.0
     probs = torch.softmax(scores.float(), dim=1)
     confidence, pred = probs.max(dim=1)
-    correct = gallery_pids[pred].eq(query_pids).float().detach().cpu()
+    correct = gallery_pids[pred.cpu()].eq(query_pids).float()
     confidence = confidence.detach().cpu()
     order = np.sort(confidence.numpy())
     edges = np.interp(
