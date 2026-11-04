@@ -1,6 +1,5 @@
 from model import objectives
 from .clip_model import Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
-import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -60,14 +59,16 @@ class IRRA(nn.Module):
             nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
             nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
 
-        self.tc_epoch = 1
         if self.use_tc:
-            self.tc_loss = objectives.WeightSoftCELoss(
-                imagegamma=getattr(args, 'tc_image_gamma', 2.0),
-                textgamma=getattr(args, 'tc_text_gamma', 2.0),
-                alpha=getattr(args, 'tc_gamma_alpha', 0.1),
-                maxgamma=getattr(args, 'tc_max_gamma', 5.0),
-                mingamma=getattr(args, 'tc_min_gamma', -1.0),
+            self.tc_loss = objectives.TCGamma(
+                image_gamma=getattr(args, 'tc_image_gamma', 0.0),
+                text_gamma=getattr(args, 'tc_text_gamma', 0.0),
+                tau=getattr(args, 'tc_difficulty_tau', 0.05),
+                ema=getattr(args, 'tc_difficulty_ema', 0.9),
+                step=getattr(args, 'tc_gamma_step', 0.2),
+                ref=getattr(args, 'tc_gamma_ref', 0.5),
+                max_focal=getattr(args, 'tc_gamma_max_focal', 5.0),
+                max_inv=getattr(args, 'tc_gamma_max_inv', 1.0),
             )
 
     def _set_task(self):
@@ -91,43 +92,6 @@ class IRRA(nn.Module):
 
         x = self.ln_post(x)
         return x
-
-    def init_momentum_teacher(self):
-        self.base_model_m = copy.deepcopy(self.base_model)
-        self.base_model_m.eval()
-        for param in self.base_model_m.parameters():
-            param.requires_grad = False
-
-    def train(self, mode=True):
-        super().train(mode)
-        if self.use_tc and hasattr(self, 'base_model_m'):
-            self.base_model_m.eval()
-        return self
-
-    def set_tc_epoch(self, epoch):
-        self.tc_epoch = int(epoch)
-
-    def current_soft_weight(self):
-        end = float(getattr(self.args, 'tc_soft_weight_end', 0.3))
-        num_epoch = max(int(self.args.num_epoch), 1)
-        if num_epoch == 1:
-            return 0.0
-        progress = (self.tc_epoch - 1) / (num_epoch - 1)
-        progress = min(max(progress, 0.0), 1.0)
-        return end * progress
-
-    @torch.no_grad()
-    def _momentum_update(self):
-        momentum = float(getattr(self.args, 'tc_momentum', 0.995))
-        for param, param_m in zip(self.base_model.parameters(), self.base_model_m.parameters()):
-            param_m.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
-
-    def _global_feats(self, clip, images, caption_ids):
-        image_feats, text_feats = clip(images, caption_ids)
-        i_feats = image_feats[:, 0, :].float()
-        t_feats = text_feats[torch.arange(text_feats.shape[0], device=text_feats.device),
-                             caption_ids.argmax(dim=-1)].float()
-        return i_feats, t_feats
 
     def encode_image(self, image):
         x = self.base_model.encode_image(image)
@@ -161,17 +125,8 @@ class IRRA(nn.Module):
             ret.update({'cmpm_loss':objectives.compute_cmpm(i_feats, t_feats, batch['pids'])})
 
         if self.use_tc:
-            self._momentum_update()
-            with torch.no_grad():
-                teacher_i, teacher_t = self._global_feats(
-                    self.base_model_m, images, caption_ids)
             tc_loss = objectives.compute_tc(
-                i_feats, t_feats, teacher_i, teacher_t, batch['pids'],
-                logit_scale,
-                teacher_temperature=getattr(self.args, 'tc_teacher_temperature', 0.07),
-                soft_weight=self.current_soft_weight(),
-                criterion=self.tc_loss,
-            )
+                i_feats, t_feats, batch['pids'], logit_scale, self.tc_loss)
             ret.update({'tc_loss': tc_loss * getattr(self.args, 'tc_loss_weight', 1.0)})
         
         if 'id' in self.current_task:
@@ -225,6 +180,4 @@ def build_model(args, num_classes=11003):
     model = IRRA(args, num_classes)
     # covert model to fp16
     convert_weights(model)
-    if model.use_tc:
-        model.init_momentum_teacher()
     return model

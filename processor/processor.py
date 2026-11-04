@@ -53,7 +53,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         model.train()
         module = model.module if args.distributed else model
         if getattr(module, 'use_tc', False):
-            module.set_tc_epoch(epoch)
+            module.tc_loss.reset_epoch_stats()
 
         for n_iter, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -109,11 +109,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         if epoch % eval_period == 0:
             if get_rank() == 0:
                 logger.info("Validation Results - Epoch: {}".format(epoch))
-                num_bins = args.tc_num_bins if use_tc else 0
                 if args.distributed:
-                    mean_mr = evaluator.eval(model.module.eval(), num_bins=num_bins)
+                    mean_mr = evaluator.eval(model.module.eval())
                 else:
-                    mean_mr = evaluator.eval(model.eval(), num_bins=num_bins)
+                    mean_mr = evaluator.eval(model.eval())
 
                 torch.cuda.empty_cache()
                 if mean_mr > best_mr:
@@ -136,8 +135,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     flag[0] = 1
                 torch.distributed.broadcast(flag, src=0)
                 stop_training = bool(flag.item())
-        if use_tc and epoch % eval_period == 0:
-            _update_tc_gamma(args, model, evaluator, logger)
+        if use_tc:
+            _update_tc_gamma(args, model, logger)
         if stop_training:
             if get_rank() == 0:
                 logger.info(
@@ -149,27 +148,26 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             best_mr, arguments["epoch"]))
 
 
-def _update_tc_gamma(args, model, evaluator, logger):
+def _update_tc_gamma(args, model, logger):
+    module = model.module if args.distributed else model
+    stats = torch.stack([
+        module.tc_loss.i2t_diff_sum,
+        module.tc_loss.t2i_diff_sum,
+        module.tc_loss.diff_count,
+    ])
     if args.distributed:
-        payload = torch.zeros(2, device="cuda")
-        if get_rank() == 0:
-            payload[0] = evaluator.last_i2t_gap
-            payload[1] = evaluator.last_t2i_gap
-        torch.distributed.broadcast(payload, src=0)
-        i2t_gap = float(payload[0])
-        t2i_gap = float(payload[1])
-        module = model.module
-    else:
-        i2t_gap = evaluator.last_i2t_gap
-        t2i_gap = evaluator.last_t2i_gap
-        module = model
-    module.tc_loss.updategamma(i2t_gap, t2i_gap)
+        torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+    module.tc_loss.update_from_epoch(stats[0], stats[1], stats[2])
+    module.tc_loss.reset_epoch_stats()
     if get_rank() == 0:
         logger.info(
-            "TC gamma i2t: {:.4f}, t2i: {:.4f} (gaps {:.4f}, {:.4f})".format(
+            "TC difficulty i2t: {:.4f} (ema {:.4f}), t2i: {:.4f} (ema {:.4f}), gamma i2t: {:.4f}, t2i: {:.4f}".format(
+                float(module.tc_loss.last_i2t_difficulty),
+                float(module.tc_loss.i2t_difficulty_ema),
+                float(module.tc_loss.last_t2i_difficulty),
+                float(module.tc_loss.t2i_difficulty_ema),
                 float(module.tc_loss.image_to_textgamma),
-                float(module.tc_loss.text_to_imagegamma),
-                i2t_gap, t2i_gap))
+                float(module.tc_loss.text_to_imagegamma)))
 
 
 def do_inference(model, test_img_loader, test_txt_loader):

@@ -122,90 +122,112 @@ def compute_cmpm(image_embeddings, text_embeddings, labels, epsilon=1e-8):
     return cmpm_loss
 
 
-class WeightSoftCELoss(nn.Module):
-    """Weighted soft-target cross entropy used as TC loss in LSCI-TC."""
+class TCGamma(nn.Module):
+    """Persistent TC gamma and difficulty EMA. Forward only reads them."""
 
-    def __init__(self, imagegamma=2.0, textgamma=2.0, alpha=0.1,
-                 maxgamma=5.0, mingamma=-1.0):
+    def __init__(self, image_gamma=0.0, text_gamma=0.0, tau=0.05, ema=0.9,
+                 step=0.2, ref=0.5, max_focal=5.0, max_inv=1.0):
         super().__init__()
-        self.imagegamma = float(imagegamma)
-        self.textgamma = float(textgamma)
-        self.alpha = float(alpha)
-        self.register_buffer('maxgamma', torch.tensor(float(maxgamma)))
-        self.register_buffer('mingamma', torch.tensor(float(mingamma)))
-        self.register_buffer('image_to_textgamma', torch.tensor(self.imagegamma))
-        self.register_buffer('text_to_imagegamma', torch.tensor(self.textgamma))
+        self.tau = float(tau)
+        self.ema = float(ema)
+        self.step = float(step)
+        self.ref = float(ref)
+        self.register_buffer('image_to_textgamma', torch.tensor(float(image_gamma)))
+        self.register_buffer('text_to_imagegamma', torch.tensor(float(text_gamma)))
+        self.register_buffer('i2t_difficulty_ema', torch.tensor(0.5))
+        self.register_buffer('t2i_difficulty_ema', torch.tensor(0.5))
+        self.register_buffer('last_i2t_difficulty', torch.tensor(0.5))
+        self.register_buffer('last_t2i_difficulty', torch.tensor(0.5))
+        self.register_buffer('max_focal', torch.tensor(float(max_focal)))
+        self.register_buffer('max_inv', torch.tensor(float(max_inv)))
+        self.register_buffer('i2t_diff_sum', torch.zeros(()))
+        self.register_buffer('t2i_diff_sum', torch.zeros(()))
+        self.register_buffer('diff_count', torch.zeros(()))
 
-    def update_gamma(self, which, gap, max_change=0.2):
-        gamma = self.image_to_textgamma if which == 'i2t' else self.text_to_imagegamma
-        gap = torch.as_tensor(gap, dtype=gamma.dtype, device=gamma.device)
-        exp_factor = torch.tanh(gap) + 1.0
-        target = torch.clamp(gamma * exp_factor, self.mingamma, self.maxgamma)
-        delta = torch.clamp(target - gamma, -max_change, max_change)
-        new_gamma = gamma + delta
-        base_gamma = self.imagegamma if which == 'i2t' else self.textgamma
-        if abs(base_gamma) < abs(self.alpha * self.imagegamma):
-            new_gamma = gamma.new_tensor(-self.alpha * self.imagegamma)
-        gamma.copy_(new_gamma.reshape_as(gamma))
+    def reset_epoch_stats(self):
+        self.i2t_diff_sum.zero_()
+        self.t2i_diff_sum.zero_()
+        self.diff_count.zero_()
 
-    def updategamma(self, image_text_meancalibration_gap, text_image_meancalibration_gap):
-        self.update_gamma('i2t', image_text_meancalibration_gap)
-        self.update_gamma('t2i', text_image_meancalibration_gap)
-        if abs(float(self.image_to_textgamma)) < abs(self.alpha * self.imagegamma):
-            self.image_to_textgamma.fill_(-self.alpha * self.imagegamma)
-        elif abs(float(self.text_to_imagegamma)) < abs(self.alpha * self.textgamma):
-            self.text_to_imagegamma.fill_(-self.alpha * self.textgamma)
+    def accumulate(self, i2t_sum, t2i_sum, count):
+        self.i2t_diff_sum.add_(i2t_sum.detach())
+        self.t2i_diff_sum.add_(t2i_sum.detach())
+        self.diff_count.add_(count.detach())
 
-    def forward(self, inputs, labels, text_to_image=False):
-        log_inputs = F.log_softmax(inputs, dim=1)
-        pt = log_inputs.exp()
-        if text_to_image:
-            gamma = self.text_to_imagegamma
-        else:
-            gamma = self.image_to_textgamma
-        gamma = gamma.to(device=inputs.device, dtype=inputs.dtype)
-        gamma_sign = torch.sign(gamma)
-        pt = gamma_sign * pt
-        gamma_mag = gamma.abs().detach()
-        weight_targets = torch.clamp(torch.abs(labels - pt), min=1e-5, max=2).pow(gamma_mag) * labels
-        loss = torch._C._nn.cross_entropy_loss(inputs, weight_targets).mean()
-        return loss
+    @torch.no_grad()
+    def update_from_epoch(self, i2t_sum, t2i_sum, count):
+        count = torch.as_tensor(count, dtype=self.diff_count.dtype, device=self.diff_count.device)
+        if float(count) <= 0:
+            return
+        i2t_sum = torch.as_tensor(i2t_sum, dtype=self.i2t_diff_sum.dtype, device=self.i2t_diff_sum.device)
+        t2i_sum = torch.as_tensor(t2i_sum, dtype=self.t2i_diff_sum.dtype, device=self.t2i_diff_sum.device)
+        difficulty_i2t = i2t_sum / count
+        difficulty_t2i = t2i_sum / count
+        self.last_i2t_difficulty.copy_(difficulty_i2t)
+        self.last_t2i_difficulty.copy_(difficulty_t2i)
+        self.i2t_difficulty_ema.mul_(self.ema).add_(difficulty_i2t, alpha=1.0 - self.ema)
+        self.t2i_difficulty_ema.mul_(self.ema).add_(difficulty_t2i, alpha=1.0 - self.ema)
+        self._step_gamma(self.image_to_textgamma, self.i2t_difficulty_ema)
+        self._step_gamma(self.text_to_imagegamma, self.t2i_difficulty_ema)
 
-
-def hard_pid_targets(pid):
-    """Row-normalized multi-positive targets, same matching rule as SDM."""
-    pid = pid.reshape(-1, 1)
-    match = (pid == pid.t()).float()
-    return match / match.sum(dim=1, keepdim=True)
+    def _step_gamma(self, gamma, difficulty):
+        updated = gamma + self.step * (difficulty - self.ref)
+        updated = updated.clamp(-self.max_inv, self.max_focal)
+        gamma.copy_(updated.reshape_as(gamma))
 
 
-def compute_tc(image_features, text_features, teacher_image, teacher_text, pid,
-               logit_scale, teacher_temperature, soft_weight, criterion):
-    """
-    TC loss.
+def one_index_per_pid(pid):
+    """One random row for each pid. Other rows of that pid stay out of TC."""
+    pid = pid.reshape(-1)
+    chosen = []
+    for value in torch.unique(pid):
+        rows = torch.nonzero(pid == value, as_tuple=False).reshape(-1)
+        pick = torch.randint(rows.numel(), (1,), device=rows.device)
+        chosen.append(rows[pick])
+    return torch.cat(chosen)
 
-    Hard targets are the row-normalized same-image caption matches.
-    The soft component is the momentum teacher's similarity, with the
-    teacher stopped from gradients. Student logits keep IRRA's logit_scale.
-    """
-    hard = hard_pid_targets(pid).to(image_features.device)
-    soft_weight = image_features.new_tensor(float(soft_weight))
 
+def positive_pair_weight(positive_prob, gamma):
+    """Focal when gamma >= 0, inverse-focal when gamma < 0. Mean weight is 1."""
+    gamma = gamma.detach().to(device=positive_prob.device, dtype=positive_prob.dtype)
+    focal = (1.0 - positive_prob).clamp_min(1e-6).pow(gamma.clamp(min=0))
+    inverse = (1.0 + positive_prob).pow((-gamma).clamp(min=0))
+    weight = torch.where(gamma >= 0, focal, inverse)
+    return weight / weight.mean().clamp_min(1e-6)
+
+
+def positive_pair_loss(logits, gamma):
+    positive_prob = F.softmax(logits, dim=1).diag()
+    weight = positive_pair_weight(positive_prob, gamma)
+    return -(weight * positive_prob.clamp_min(1e-6).log()).mean()
+
+
+def pair_difficulty(similarity, tau):
+    """Mean hardness of the diagonal against the hardest off-diagonal entry."""
+    if similarity.size(0) < 2:
+        zero = similarity.new_zeros(())
+        return zero, zero
+    eye = torch.eye(similarity.size(0), dtype=torch.bool, device=similarity.device)
+    positive = similarity.diag()
+    hardest = similarity.masked_fill(eye, float('-inf')).max(dim=1).values
+    hardness = torch.sigmoid(-(positive - hardest) / tau)
+    return hardness.sum(), hardness.new_tensor(float(hardness.numel()))
+
+
+def compute_tc(image_features, text_features, pid, logit_scale, state):
+    """One-to-one TC loss and its matching difficulty, from one shared subset."""
+    keep = one_index_per_pid(pid)
+    image_features = image_features[keep]
+    text_features = text_features[keep]
     image_norm = image_features / image_features.norm(dim=-1, keepdim=True)
     text_norm = text_features / text_features.norm(dim=-1, keepdim=True)
-    scale = logit_scale.to(image_features.device)
-    logits_per_image = scale * image_norm @ text_norm.t()
-    logits_per_text = logits_per_image.t()
-
-    teacher_image = teacher_image / teacher_image.norm(dim=-1, keepdim=True)
-    teacher_text = teacher_text / teacher_text.norm(dim=-1, keepdim=True)
-    teacher_scale = image_features.new_tensor(1.0 / float(teacher_temperature))
-    soft_i2t = F.softmax(teacher_scale * teacher_image @ teacher_text.t(), dim=1)
-    soft_t2i = F.softmax(teacher_scale * teacher_text @ teacher_image.t(), dim=1)
-
-    targets_i2t = (1.0 - soft_weight) * hard + soft_weight * soft_i2t
-    targets_t2i = (1.0 - soft_weight) * hard + soft_weight * soft_t2i
-    loss_i = criterion(logits_per_image, targets_i2t, text_to_image=False)
-    loss_t = criterion(logits_per_text, targets_t2i, text_to_image=True)
+    similarity = image_norm @ text_norm.t()
+    logits = logit_scale.to(similarity.device) * similarity
+    loss_i = positive_pair_loss(logits, state.image_to_textgamma)
+    loss_t = positive_pair_loss(logits.t(), state.text_to_imagegamma)
+    with torch.no_grad():
+        i2t_sum, count = pair_difficulty(similarity, state.tau)
+        t2i_sum, _ = pair_difficulty(similarity.t(), state.tau)
+        state.accumulate(i2t_sum, t2i_sum, count)
     return (loss_i + loss_t) / 2
 
