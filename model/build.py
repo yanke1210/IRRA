@@ -1,7 +1,6 @@
 from model import objectives
 from .clip_model import Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
-import copy
-import numpy as np
+from .ot_matcher import OTMatcher
 import torch
 import torch.nn as nn
 from collections import OrderedDict
@@ -60,22 +59,25 @@ class IRRA(nn.Module):
             nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
             nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
 
-        self.tc_epoch = 1
-        if self.use_tc:
-            self.tc_loss = objectives.WeightSoftCELoss(
-                imagegamma=getattr(args, 'tc_image_gamma', 2.0),
-                textgamma=getattr(args, 'tc_text_gamma', 2.0),
-                alpha=getattr(args, 'tc_gamma_alpha', 0.1),
-                maxgamma=getattr(args, 'tc_max_gamma', 5.0),
-                mingamma=getattr(args, 'tc_min_gamma', -1.0),
+        if self.use_ot:
+            self.ot_matcher = OTMatcher(
+                embed_dim=self.embed_dim,
+                hid_dim=getattr(args, 'ot_hid_dim', 512),
+                num_dustbins=getattr(args, 'ot_num_dustbins', 8),
+                sinkhorn_eps=getattr(args, 'ot_sinkhorn_eps', 0.1),
+                sinkhorn_iters=getattr(args, 'ot_sinkhorn_iters', 20),
+                gate_init=getattr(args, 'ot_gate_init', 0.1),
             )
+            self.ot_k_candidates = int(getattr(args, 'ot_k_candidates', 50))
+            self.ot_eval_batch_size = int(getattr(args, 'ot_eval_batch_size', 128))
+            self.ot_num_hard_negatives = int(getattr(args, 'ot_num_hard_negatives', 3))
 
     def _set_task(self):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
         self.use_mlm = 'mlm' in self.current_task
         self.use_amlm = 'amlm' in self.current_task
-        self.use_tc = 'tc' in self.current_task
+        self.use_ot = 'ot' in self.current_task
         print(f'Training Model with {self.current_task} tasks')
     
     
@@ -92,43 +94,6 @@ class IRRA(nn.Module):
         x = self.ln_post(x)
         return x
 
-    def init_momentum_teacher(self):
-        self.base_model_m = copy.deepcopy(self.base_model)
-        self.base_model_m.eval()
-        for param in self.base_model_m.parameters():
-            param.requires_grad = False
-
-    def train(self, mode=True):
-        super().train(mode)
-        if self.use_tc and hasattr(self, 'base_model_m'):
-            self.base_model_m.eval()
-        return self
-
-    def set_tc_epoch(self, epoch):
-        self.tc_epoch = int(epoch)
-
-    def current_soft_weight(self):
-        end = float(getattr(self.args, 'tc_soft_weight_end', 0.3))
-        num_epoch = max(int(self.args.num_epoch), 1)
-        if num_epoch == 1:
-            return 0.0
-        progress = (self.tc_epoch - 1) / (num_epoch - 1)
-        progress = min(max(progress, 0.0), 1.0)
-        return end * progress
-
-    @torch.no_grad()
-    def _momentum_update(self):
-        momentum = float(getattr(self.args, 'tc_momentum', 0.995))
-        for param, param_m in zip(self.base_model.parameters(), self.base_model_m.parameters()):
-            param_m.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
-
-    def _global_feats(self, clip, images, caption_ids):
-        image_feats, text_feats = clip(images, caption_ids)
-        i_feats = image_feats[:, 0, :].float()
-        t_feats = text_feats[torch.arange(text_feats.shape[0], device=text_feats.device),
-                             caption_ids.argmax(dim=-1)].float()
-        return i_feats, t_feats
-
     def encode_image(self, image):
         x = self.base_model.encode_image(image)
         return x[:, 0, :].float()
@@ -137,6 +102,16 @@ class IRRA(nn.Module):
     def encode_text(self, text):
         x = self.base_model.encode_text(text)
         return x[torch.arange(x.shape[0]), text.argmax(dim=-1)].float()
+
+    def encode_image_tokens(self, image):
+        feats = self.base_model.encode_image(image).float()
+        return feats[:, 0, :], feats
+
+    def encode_text_tokens(self, text):
+        feats = self.base_model.encode_text(text).float()
+        eot = text.argmax(dim=-1)
+        global_feat = feats[torch.arange(feats.shape[0], device=feats.device), eot]
+        return global_feat, feats, eot + 1
 
     def forward(self, batch):
         ret = dict()
@@ -160,19 +135,13 @@ class IRRA(nn.Module):
         if 'cmpm' in self.current_task:
             ret.update({'cmpm_loss':objectives.compute_cmpm(i_feats, t_feats, batch['pids'])})
 
-        if self.use_tc:
-            self._momentum_update()
-            with torch.no_grad():
-                teacher_i, teacher_t = self._global_feats(
-                    self.base_model_m, images, caption_ids)
-            tc_loss = objectives.compute_tc(
-                i_feats, t_feats, teacher_i, teacher_t, batch['pids'],
-                logit_scale,
-                teacher_temperature=getattr(self.args, 'tc_teacher_temperature', 0.07),
-                soft_weight=self.current_soft_weight(),
-                criterion=self.tc_loss,
-            )
-            ret.update({'tc_loss': tc_loss * getattr(self.args, 'tc_loss_weight', 1.0)})
+        if self.use_ot:
+            ot_loss = objectives.compute_ot(
+                self.ot_matcher, i_feats, t_feats,
+                image_feats.float(), text_feats.float(),
+                caption_ids, batch['pids'], logit_scale,
+                num_hard_negatives=self.ot_num_hard_negatives)
+            ret.update({'ot_loss': ot_loss * getattr(self.args, 'ot_loss_weight', 1.0)})
         
         if 'id' in self.current_task:
             image_logits = self.classifier(i_feats.half()).float()
@@ -225,6 +194,4 @@ def build_model(args, num_classes=11003):
     model = IRRA(args, num_classes)
     # covert model to fp16
     convert_weights(model)
-    if model.use_tc:
-        model.init_momentum_teacher()
     return model
